@@ -29,8 +29,24 @@
     if (t.indexOf('failed to fetch') >= 0 || t.indexOf('network') >= 0) return "Can't reach Zambux. Check your connection.";
     return (e && e.message) || 'Something went wrong.';
   }
+  var DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  function daysText(days) {
+    var d = (days || []).slice().sort(function (a, b) { return a - b; }); if (d.length === 7) return 'Every day';
+    var order = d.map(function (x) { return (x + 6) % 7; }).sort(function (a, b) { return a - b; }), runs = [];
+    order.forEach(function (x) { var last = runs[runs.length - 1]; if (last && last[last.length - 1] + 1 === x) last.push(x); else runs.push([x]); });
+    return runs.map(function (r) { return r.length >= 3 ? DAY_SHORT[(r[0] + 1) % 7] + ' to ' + DAY_SHORT[(r[r.length - 1] + 1) % 7] : r.map(function (x) { return DAY_SHORT[(x + 1) % 7]; }).join(', '); }).join(', ');
+  }
+  function prettyTime(t) { var p = String(t || '0:0').split(':'), h = +p[0], m = +p[1], h12 = h % 12 === 0 ? 12 : h % 12; return h12 + (m ? ':' + (m < 10 ? '0' : '') + m : '') + (h < 12 ? ' am' : ' pm'); }
+  var TABC_STATUS = {
+    confirmed: 'Checked automatically against TABC: active, a permit type we accept, and the name and address match.',
+    admin_confirmed: 'Confirmed by hand.',
+    review: 'The automatic check found something that does not match. Compare TABC\'s record with the business, and confirm only if it is the same business.',
+    inactive: 'TABC lists this permit as not active.',
+    not_found: 'TABC has no record of this number.',
+    error: 'TABC could not be reached for the automatic check. Look it up on tabc.texas.gov (Public Inquiry) and confirm by hand.'
+  };
   var $app = document.getElementById('app');
-  var state = { user: null, overview: null, list: null, waitlist: null, loading: false, error: null, drawer: null, notice: null };
+  var state = { user: null, overview: null, list: null, waitlist: null, hh: null, loading: false, error: null, drawer: null, notice: null };
 
   // ---------- data: real ----------
   var sb = null;
@@ -46,7 +62,11 @@
     unverify: function (id, reason) { return sb.rpc('admin_log_verification', { p_business_id: id, p_action: 'unverified', p_methods: [], p_notes: reason }).then(unwrap); },
     reject: function (id, reason) { return sb.rpc('admin_reject_business', { p_business_id: id, p_reason: reason }).then(unwrap); },
     setTier: function (id, tier) { return sb.rpc('admin_set_tier', { p_business_id: id, p_tier: tier }).then(unwrap); },
-    waitlist: function () { return sb.rpc('admin_waitlist').then(unwrap); }
+    waitlist: function () { return sb.rpc('admin_waitlist').then(unwrap); },
+    pendingHH: function () { return sb.rpc('admin_pending_happy_hours').then(unwrap); },
+    reviewHH: function (id, approve, note) { return sb.rpc('admin_review_happy_hour', { p_business_id: id, p_approve: approve, p_note: note || null }).then(unwrap); },
+    tabc: function (id) { return sb.from('businesses').select('tabc_permit,tabc_verified,tabc_check_status,tabc_check_note').eq('id', id).maybeSingle().then(unwrap); },
+    setTabc: function (id, v) { return sb.rpc('admin_set_tabc_verified', { p_business_id: id, p_verified: v }).then(unwrap); }
   };
   function unwrap(res) { if (res.error) throw res.error; return res.data; }
 
@@ -95,6 +115,10 @@
     });
     return r;
   }
+  var demoHH = [
+    { business_id: 'hh1', name: 'La Cantina', street: '1204 S Congress Ave', zip: '78704', plan: 'pro', details: '$6 margaritas, $4 well drinks and $3 street tacos at the bar.', days: [1, 2, 3, 4, 5], start_time: '16:00', end_time: '19:00', starts_on: '2026-12-01', ends_on: '2026-12-30', tabc_permit: 'MB123456', tabc_verified: true, tabc_check_status: 'confirmed', tabc_check_note: 'TABC: LA CANTINA (LA CANTINA LLC), 1204 S CONGRESS AVE, Austin 78704. Type MB, Active.' },
+    { business_id: 'hh2', name: 'Corner Taqueria', street: '5 E 6th St', zip: '78701', plan: 'starter', details: 'Half-price appetizers and $5 beer.', days: [2, 3], start_time: '15:00', end_time: '18:00', starts_on: '2026-12-01', ends_on: '2026-12-20', tabc_permit: 'BG555555', tabc_verified: false, tabc_check_status: 'review', tabc_check_note: 'TABC: SOMEONE ELSES BAR, 900 ELM ST. Doesn\'t match: name.' }
+  ];
   function demoApi() {
     demoRows = buildDemo();
     var p = function (v) { return new Promise(function (r) { setTimeout(function () { r(v); }, 120); }); };
@@ -114,6 +138,10 @@
           funnel: { created: all.length, verified: all.length - pend.length, posted: Math.round(all.length * 0.72), redeemed: Math.round(all.length * 0.6), paying: by('starter') + by('pro') }
         });
       },
+      pendingHH: function () { return p(demoHH.slice()); },
+      reviewHH: function (id) { demoHH = demoHH.filter(function (h) { return h.business_id !== id; }); return p({}); },
+      tabc: function () { return p({ tabc_permit: 'MB188256', tabc_verified: false, tabc_check_status: 'review', tabc_check_note: 'TABC: OLIVE GARDEN OF TEXAS #1044 (OLIVE GARDEN OF TEXAS LLC), 8833 BURNET RD, Austin 78757. Type MB, Active, expires 2027-07-31. Business gave: Corner Taqueria, 5 E 6th St 78701. Doesn\'t match: name and address.' }); },
+      setTabc: function () { return p({}); },
       list: function (f) { var r = demoFilter(f); return p({ total: r.length, rows: r.slice((f.page - 1) * f.size, f.page * f.size) }); },
       approve: function (id) { var b = demoRows.filter(function (x) { return x.id === id; })[0]; b.verified = true; b.waiting_hours = null; return p({}); },
       unverify: function (id) { var b = demoRows.filter(function (x) { return x.id === id; })[0]; b.verified = false; b.waiting_hours = 1; return p({}); },
@@ -189,12 +217,25 @@
       return '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-bottom:10px"><div style="flex:0 0 220px;font-weight:600">' + s[0] + '</div><div class="track" style="flex:1 1 220px;height:16px"><div class="fill" style="width:' + pct + '%"></div></div><div style="flex:0 0 130px"><b>' + num(s[1]) + '</b> <span class="sm2">' + pct + '%</span></div></div>';
     }).join('');
 
-    var body = '<section class="kpis">' + kpis + '</section>' +
+    var body = '<section class="kpis">' + kpis + '</section>' + hhCard() +
       '<section class="cols"><div class="card" style="flex:2 1 460px"><div style="display:flex;justify-content:space-between;align-items:baseline"><h2 style="font-size:20px">Waiting for approval</h2><a href="#/businesses?view=pending&sort=waiting" style="font-weight:600">Open queue</a></div><div class="sub" style="margin-bottom:6px">Oldest first. Goal: every business checked within ' + GOAL_HOURS + ' hours.</div>' + queue + '</div>' +
       '<div class="card" style="flex:1 1 320px"><h2 style="font-size:20px;margin-bottom:12px">By industry</h2>' + ind + '</div></section>' +
       '<section class="cols"><div class="card" style="flex:1 1 420px"><h2 style="font-size:20px">By city</h2><div class="sub" style="margin-bottom:8px">One row per market.</div><div class="tablewrap"><table class="t"><thead><tr><th>City</th><th class="n">Businesses</th><th class="n">Approved</th><th class="n">Paying</th><th class="n">Projected MRR</th></tr></thead><tbody>' + cities + '</tbody></table></div></div>' +
       '<div class="card" style="flex:2 1 460px"><h2 style="font-size:20px">From sign-up to paying</h2><div class="sub" style="margin-bottom:12px">Where businesses drop off.</div>' + funnel + '</div></section>' + waitlistCard();
     return shell('overview', body, { title: 'Overview', sub: 'Austin. Numbers update each time you open this page.' });
+  }
+
+  function hhCard() {
+    var h = state.hh; if (!h || !h.length) return '';
+    var items = h.map(function (x) {
+      var permit = 'TABC permit ' + esc(x.tabc_permit || 'none') + ': ' + (x.tabc_verified ? '<b style="color:#15803D">confirmed</b>' : '<b style="color:#C4263B">not confirmed</b>');
+      return '<div style="border-top:1px solid #DCE2EC;padding:14px 0"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px"><div><b>' + esc(x.name) + '</b><div class="sm2">' + esc(x.street) + ', Austin ' + esc(x.zip) + ' &middot; ' + esc(x.plan) + ' plan</div></div>' +
+        '<div style="display:flex;gap:8px;align-items:flex-start"><button class="btn pri sm" data-hh-ok="' + esc(x.business_id) + '">Approve</button><button class="btn danger sm" data-hh-no="' + esc(x.business_id) + '">Reject&hellip;</button></div></div>' +
+        '<div style="margin:10px 0;padding:12px;background:#F4F7FB;border-radius:10px;font-weight:600">' + esc(x.details) + '</div>' +
+        '<div class="sm2">' + esc(daysText(x.days)) + ' &middot; ' + esc(prettyTime(x.start_time)) + ' to ' + esc(prettyTime(x.end_time)) + ' &middot; ' + esc(x.starts_on) + ' to ' + esc(x.ends_on) + '</div>' +
+        '<div class="sm2" style="margin-top:4px">' + permit + '</div>' + (x.tabc_check_note ? '<div class="sm2" style="margin-top:4px">' + esc(x.tabc_check_note) + '</div>' : '') + '</div>';
+    }).join('');
+    return '<section class="card" style="border:1.5px dashed #FF7A00"><h2 style="font-size:20px">Happy hours to review (' + h.length + ')</h2><div class="sub">Customers do not see a happy hour until you approve it. Check the wording and the permit.</div>' + items + '</section>';
   }
 
   function waitlistCard() {
@@ -280,7 +321,7 @@
       '<div class="kv"><span>Zambux, 30 days</span><span>' + num(b.deals_30d) + ' (last ' + esc(dateText(b.last_deal_at)) + ')</span></div>' +
       '<div class="kv"><span>Grabs / scanned, 30 days</span><span>' + num(b.grabs_30d) + ' / ' + num(b.redeemed_30d) + (b.show_up_pct != null ? ' (' + b.show_up_pct + '%)' : '') + '</span></div></div>' +
       '<label class="field"><span class="lbl">Plan</span><select id="d-plan" style="width:100%"><option value="free"' + (b.plan === 'free' ? ' selected' : '') + '>Free</option><option value="starter"' + (b.plan === 'starter' ? ' selected' : '') + '>Starter</option><option value="pro"' + (b.plan === 'pro' ? ' selected' : '') + '>Pro</option></select></label>' +
-      '<div id="d-msg" role="alert"></div>' + actions + '</aside>';
+      '<div id="d-tabc"></div><div id="d-msg" role="alert"></div>' + actions + '</aside>';
   }
 
   // ---------- rendering + events ----------
@@ -310,6 +351,18 @@
         row.onclick = open; row.onkeydown = function (e) { if (e.key === 'Enter') open(); };
       });
     }
+    if (r.page === 'overview') {
+      Array.prototype.forEach.call(document.querySelectorAll('[data-hh-ok]'), function (b) {
+        b.onclick = function () { b.disabled = true; api.reviewHH(b.getAttribute('data-hh-ok'), true).then(function () { state.notice = 'Happy hour approved. Customers can see it now.'; return reload(); }).catch(function (e) { state.error = friendly(e); render(); }); };
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-hh-no]'), function (b) {
+        b.onclick = function () {
+          var why = window.prompt('Why is this not approved? The owner will read this and can edit and send it again.'); if (why == null) return; why = why.trim();
+          if (!why) { state.error = 'Add a short reason first.'; render(); return; }
+          b.disabled = true; api.reviewHH(b.getAttribute('data-hh-no'), false, why).then(function () { state.notice = 'Happy hour sent back to the owner.'; return reload(); }).catch(function (e) { state.error = friendly(e); render(); });
+        };
+      });
+    }
     if (r.page === 'revenue') {
       var cv = $('conv'); if (cv) cv.oninput = function () { var p = Math.max(0, Math.min(100, parseFloat(cv.value) || 0)), extra = Math.round(state.overview.plan_interest.value_cents * p / 100); $('conv-out').textContent = money(extra); $('conv-total').textContent = money(state.overview.projected_mrr_cents + extra); };
     }
@@ -322,6 +375,18 @@
     var msg = function (t, good) { var m = $('d-msg'); m.innerHTML = t ? '<div class="' + (good ? 'ok' : 'err') + '">' + esc(t) + '</div>' : ''; };
     var done = function (text) { state.notice = text; state.drawer = null; return reload(); };
     var run = function (btn, fn) { btn.disabled = true; msg(''); fn().catch(function (e) { msg(friendly(e)); btn.disabled = false; }); };
+    // The TABC permit and what the automatic check found (loaded when the panel opens).
+    api.tabc(b.id).then(function (t) {
+      var box = $('d-tabc'); if (!box || !t || !t.tabc_permit) return;
+      box.innerHTML = '<div class="card" style="padding:12px"><div class="lbl">TABC permit</div><div style="font:700 20px monospace;margin:4px 0">' + esc(t.tabc_permit) + '</div>' +
+        (t.tabc_check_note ? '<div class="sm2" style="margin-bottom:6px">' + esc(t.tabc_check_note) + '</div>' : '') +
+        '<div class="sm2" style="margin-bottom:8px">' + esc(TABC_STATUS[t.tabc_check_status] || 'Not checked yet.') + '</div>' +
+        (t.tabc_verified ? '<div style="color:#15803D;font-weight:700">Permit confirmed</div><button class="btn danger sm" id="d-tabcoff" style="margin-top:6px">Remove confirmation</button>'
+                         : '<button class="btn pri sm" id="d-tabcon">I checked it. Confirm permit</button>') + '</div>';
+      var on = $('d-tabcon'), off = $('d-tabcoff');
+      if (on) on.onclick = function () { on.disabled = true; api.setTabc(b.id, true).then(function () { state.notice = 'TABC permit confirmed for ' + b.name + '.'; state.drawer = null; return reload(); }).catch(function (e) { msg(friendly(e)); on.disabled = false; }); };
+      if (off) off.onclick = function () { off.disabled = true; api.setTabc(b.id, false).then(function () { state.notice = 'Confirmation removed for ' + b.name + '.'; state.drawer = null; return reload(); }).catch(function (e) { msg(friendly(e)); off.disabled = false; }); };
+    }).catch(function () {});
     $('d-plan').onchange = function () { var sel = $('d-plan'); run(sel, function () { return api.setTier(b.id, sel.value).then(function () { return done(b.name + ' is now on the ' + sel.value + ' plan.'); }); }); };
     if ($('d-approve')) {
       $('d-approve').onclick = function () {
@@ -344,6 +409,7 @@
     state.loading = true; state.error = null;
     var jobs = [api.overview().then(function (o) { state.overview = o; })];
     // The waitlist card is optional: if its database function isn't there yet, the page simply leaves the card out.
+    if (r.page === 'overview') jobs.push(api.pendingHH().then(function (h) { state.hh = h; }).catch(function () { state.hh = null; }));
     if (r.page === 'overview') jobs.push(api.waitlist().then(function (w) { state.waitlist = w; }).catch(function () { state.waitlist = null; }));
     if (r.page === 'businesses') jobs.push(api.list(filtersFromQ(r.q)).then(function (l) { state.list = l; }));
     return Promise.all(jobs).then(function () {
