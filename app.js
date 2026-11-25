@@ -30,7 +30,7 @@
     return (e && e.message) || 'Something went wrong.';
   }
   var $app = document.getElementById('app');
-  var state = { user: null, overview: null, list: null, loading: false, error: null, drawer: null, notice: null };
+  var state = { user: null, overview: null, list: null, waitlist: null, loading: false, error: null, drawer: null, notice: null };
 
   // ---------- data: real ----------
   var sb = null;
@@ -45,7 +45,8 @@
     approve: function (id, methods, notes) { return sb.rpc('admin_log_verification', { p_business_id: id, p_action: 'approved', p_methods: methods, p_notes: notes || null }).then(unwrap); },
     unverify: function (id, reason) { return sb.rpc('admin_log_verification', { p_business_id: id, p_action: 'unverified', p_methods: [], p_notes: reason }).then(unwrap); },
     reject: function (id, reason) { return sb.rpc('admin_reject_business', { p_business_id: id, p_reason: reason }).then(unwrap); },
-    setTier: function (id, tier) { return sb.rpc('admin_set_tier', { p_business_id: id, p_tier: tier }).then(unwrap); }
+    setTier: function (id, tier) { return sb.rpc('admin_set_tier', { p_business_id: id, p_tier: tier }).then(unwrap); },
+    waitlist: function () { return sb.rpc('admin_waitlist').then(unwrap); }
   };
   function unwrap(res) { if (res.error) throw res.error; return res.data; }
 
@@ -117,7 +118,8 @@
       approve: function (id) { var b = demoRows.filter(function (x) { return x.id === id; })[0]; b.verified = true; b.waiting_hours = null; return p({}); },
       unverify: function (id) { var b = demoRows.filter(function (x) { return x.id === id; })[0]; b.verified = false; b.waiting_hours = 1; return p({}); },
       reject: function (id) { demoRows = demoRows.filter(function (x) { return x.id !== id; }); return p({}); },
-      setTier: function (id, tier) { var b = demoRows.filter(function (x) { return x.id === id; })[0]; b.plan = tier; b.mrr_cents = tier === 'pro' ? 9900 : tier === 'starter' ? 4900 : 0; return p({}); }
+      setTier: function (id, tier) { var b = demoRows.filter(function (x) { return x.id === id; })[0]; b.plan = tier; b.mrr_cents = tier === 'pro' ? 9900 : tier === 'starter' ? 4900 : 0; return p({}); },
+      waitlist: function () { return p({ total: 14, by_city: [{ city: 'Dallas', total: 7, businesses: 5, customers: 2, latest: new Date().toISOString() }, { city: 'Houston', total: 4, businesses: 3, customers: 1, latest: new Date().toISOString() }, { city: 'San Antonio', total: 3, businesses: 2, customers: 1, latest: new Date().toISOString() }], recent: [] }); }
     };
   }
 
@@ -191,8 +193,16 @@
       '<section class="cols"><div class="card" style="flex:2 1 460px"><div style="display:flex;justify-content:space-between;align-items:baseline"><h2 style="font-size:20px">Waiting for approval</h2><a href="#/businesses?view=pending&sort=waiting" style="font-weight:600">Open queue</a></div><div class="sub" style="margin-bottom:6px">Oldest first. Goal: every business checked within ' + GOAL_HOURS + ' hours.</div>' + queue + '</div>' +
       '<div class="card" style="flex:1 1 320px"><h2 style="font-size:20px;margin-bottom:12px">By industry</h2>' + ind + '</div></section>' +
       '<section class="cols"><div class="card" style="flex:1 1 420px"><h2 style="font-size:20px">By city</h2><div class="sub" style="margin-bottom:8px">One row per market.</div><div class="tablewrap"><table class="t"><thead><tr><th>City</th><th class="n">Businesses</th><th class="n">Approved</th><th class="n">Paying</th><th class="n">Projected MRR</th></tr></thead><tbody>' + cities + '</tbody></table></div></div>' +
-      '<div class="card" style="flex:2 1 460px"><h2 style="font-size:20px">From sign-up to paying</h2><div class="sub" style="margin-bottom:12px">Where businesses drop off.</div>' + funnel + '</div></section>';
+      '<div class="card" style="flex:2 1 460px"><h2 style="font-size:20px">From sign-up to paying</h2><div class="sub" style="margin-bottom:12px">Where businesses drop off.</div>' + funnel + '</div></section>' + waitlistCard();
     return shell('overview', body, { title: 'Overview', sub: 'Austin. Numbers update each time you open this page.' });
+  }
+
+  function waitlistCard() {
+    var w = state.waitlist; if (!w) return '';
+    var rows = w.by_city.length ? w.by_city.map(function (c) {
+      return '<tr><td><b>' + esc(c.city) + '</b></td><td class="n">' + num(c.businesses) + '</td><td class="n">' + num(c.customers) + '</td><td class="n"><b>' + num(c.total) + '</b></td><td>' + esc(dateText(c.latest)) + '</td></tr>';
+    }).join('') : '<tr><td colspan="5" class="sm2" style="padding:16px 10px">Nobody has joined a waitlist yet.</td></tr>';
+    return '<section class="card"><h2 style="font-size:20px">Waiting for their city</h2><div class="sub" style="margin-bottom:8px">People outside Austin who left an email. ' + num(w.total) + ' in all. Where the most are waiting is the next city to open.</div><div class="tablewrap"><table class="t"><thead><tr><th>City</th><th class="n">Businesses</th><th class="n">Customers</th><th class="n">Total</th><th>Latest</th></tr></thead><tbody>' + rows + '</tbody></table></div></section>';
   }
 
   var VIEWS = [['all', 'All'], ['pending', 'Waiting for approval'], ['waiting_24h', 'Waiting over 24 hours'], ['wants_plan', 'Wants a paid plan'], ['dormant_30d', 'No zambux in 30 days']];
@@ -333,6 +343,8 @@
     var r = parseHash();
     state.loading = true; state.error = null;
     var jobs = [api.overview().then(function (o) { state.overview = o; })];
+    // The waitlist card is optional: if its database function isn't there yet, the page simply leaves the card out.
+    if (r.page === 'overview') jobs.push(api.waitlist().then(function (w) { state.waitlist = w; }).catch(function () { state.waitlist = null; }));
     if (r.page === 'businesses') jobs.push(api.list(filtersFromQ(r.q)).then(function (l) { state.list = l; }));
     return Promise.all(jobs).then(function () {
       if (r.page === 'businesses' && r.q.open && !state.drawer && state.list) state.drawer = state.list.rows.filter(function (b) { return b.id === r.q.open; })[0] || null;
